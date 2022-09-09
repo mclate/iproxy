@@ -14,26 +14,54 @@ import (
 	"time"
 )
 
+type Props struct {
+	addr string
+	bind string
+
+	socks     int
+	http      int
+	discovery int
+
+	verbose  bool
+	location bool
+}
+
 func main() {
-	host := "0.0.0.0"
-	sport := flag.Int("s", 1234, "SOCKS5 proxy port")
-	pport := flag.Int("p", 1235, "HTTP proxy port")
-	dport := flag.Int("d", 80, "HTTP port for auto proxy configuration discovery")
-	loc := flag.Bool("l", false, "Whether to pool location details")
-	flag.Parse()
+	props := Props{
+		addr: *flag.String("a", "172.20.10.1", "Proxy address to expose to clients"),
+		bind: *flag.String("b", "0.0.0.0", "Address to bind to"),
 
-	go httpAutoDiscover(host, *dport)
-	go httpProxy(host, *pport)
-	go socksProxy(host, *sport)
+		socks:     *flag.Int("s", 0, "SOCKS5 proxy port"),
+		http:      *flag.Int("p", 0, "HTTP proxy port"),
+		discovery: *flag.Int("d", 0, "HTTP port for auto proxy configuration discovery"),
 
-	if *loc {
-		go fetchLocation()
+		location: *flag.Bool("l", false, "Whether to pool location details"),
+		verbose:  *flag.Bool("v", false, "Enable verbose output"),
+	}
+	help := *flag.Bool("h", false, "Show help")
+
+	if help {
+		flag.PrintDefaults()
+		os.Exit(0)
+	}
+
+	if props.discovery != 0 {
+		go httpAutoDiscover(props)
+	}
+	if props.http != 0 {
+		go httpProxy(props)
+	}
+	if props.socks != 0 {
+		go socksProxy(props)
+	}
+	if props.location {
+		go fetchLocation(props.verbose)
 	}
 
 	loop()
 }
 
-func fetchLocation() {
+func fetchLocation(verbose bool) {
 	fmt.Println("Starting location streaming")
 	reader, err := os.Open("/dev/location")
 	if err != nil {
@@ -45,16 +73,30 @@ func fetchLocation() {
 		if err == io.EOF {
 			fmt.Println("Reached end of location data")
 		}
-		fmt.Printf("%q\n", p[:n])
+		if verbose {
+			fmt.Printf("%q", p[:n])
+		}
 	}
 }
 
-func httpAutoDiscover(host string, port int) {
-	addr := fmt.Sprint(host, ":", port)
+func httpAutoDiscover(props Props) {
+	addr := fmt.Sprint(props.bind, ":", props.discovery)
 	fmt.Println("Starting http discovery at", addr)
 	handler := func(w http.ResponseWriter, _ *http.Request) {
-		fmt.Println("Serving proxy discovery request")
-		_, err := io.WriteString(w, "function FindProxyForURL (url, host) {\n  return 'SOCKS5 172.20.10.1:1234; HTTP 172.20.10.1:1235; DIRECT';\n}")
+		if props.verbose {
+			fmt.Println("Serving proxy discovery request")
+		}
+		funct := "function FindProxyForURL (url, host) {\n  return '"
+		if props.socks != 0 {
+			funct += fmt.Sprint("SOCKS5 ", props.addr, ":", props.socks, "; ")
+		}
+		if props.http != 0 {
+			funct += fmt.Sprint("HTTP ", props.addr, ":", props.http, "; ")
+		}
+
+		funct += "DIRECT';}"
+
+		_, err := io.WriteString(w, funct)
 		if err != nil {
 			return
 		}
@@ -76,16 +118,16 @@ func loop() {
 	}
 }
 
-func httpProxy(host string, port int) {
-	addr := fmt.Sprint(host, ":", port)
+func httpProxy(props Props) {
+	addr := fmt.Sprint(props.addr, ":", props.http)
 	fmt.Println("Starting http proxy at", addr)
 	proxy := goproxy.NewProxyHttpServer()
-	//proxy.Verbose = true
+	proxy.Verbose = props.verbose
 	log.Fatal(http.ListenAndServe(addr, proxy))
 }
 
-func socksProxy(host string, port int) {
-	addr := fmt.Sprint(host, ":", port)
+func socksProxy(props Props) {
+	addr := fmt.Sprint(props.addr, ":", props.socks)
 	fmt.Println("Starting socks5 proxy at", addr)
 	conf := &socks5.Config{}
 	server, err := socks5.New(conf)
